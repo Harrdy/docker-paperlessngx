@@ -1,0 +1,108 @@
+services:
+  broker:
+    image: docker.io/library/redis:7
+    restart: unless-stopped
+    volumes:
+      - ${MOUNT_ROOT}/paperless/redis:/data
+    networks:
+      - backend
+
+  db:
+    image: docker.io/library/postgres:15
+    restart: unless-stopped
+    volumes:
+      - ${MOUNT_ROOT}/paperless/postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    networks:
+      - backend
+
+  webserver:
+    image: ghcr.io/paperless-ngx/paperless-ngx:latest
+    restart: unless-stopped
+    depends_on:
+      - db
+      - broker
+      - gotenberg
+      - tika
+    ports:
+      - 8010:8000
+    networks:
+      - backend
+      - frontend
+    volumes:
+      - ${MOUNT_ROOT}/paperless/ngx/data:/usr/src/paperless/data
+      - ${MOUNT_ROOT}/paperless/ngx/media:/usr/src/paperless/media
+      - ${MOUNT_ROOT}/paperless/ngx/export:/usr/src/paperless/export
+      - ${MOUNT_ROOT}/paperless/ngx/consume:/usr/src/paperless/consume
+      - ${MOUNT_ROOT}/paperless/ngx/trash:/usr/src/paperless/trash
+      - ${MOUNT_ROOT}/paperless/ngx/paperless-ngx-postprocessor:/usr/src/paperless-ngx-postprocessor
+    environment:
+      PAPERLESS_REDIS: redis://broker:6379
+      PAPERLESS_DBHOST: db
+      USERMAP_UID: ${PUID}
+      USERMAP_GID: ${PGID}
+      PAPERLESS_TRASH_DIR: "../trash"
+      PAPERLESS_OCR_LANGUAGES: deu
+      PAPERLESS_SECRET_KEY: ${PAPERLESS_SECRET_KEY}
+      PAPERLESS_TIME_ZONE: ${TZ}
+      PAPERLESS_OCR_LANGUAGE: deu
+      PAPERLESS_ALLOWED_HOSTS: ${PAPERLESS_ALLOWED_HOSTS}
+      PAPERLESS_CSRF_TRUSTED_ORIGINS: ${PAPERLESS_CSRF_TRUSTED_ORIGINS}
+      PAPERLESS_FILENAME_FORMAT: "{created_year}/{title}-{tag_list}"
+      PAPERLESS_FILENAME_FORMAT_REMOVE_NONE: True
+      PAPERLESS_POST_CONSUME_SCRIPT: "/usr/src/paperless-ngx-postprocessor/post_consume_script.sh"
+      PAPERLESS_TIKA_ENABLED: 1
+      PAPERLESS_TIKA_ENDPOINT: http://tika:9998
+      PAPERLESS_TIKA_GOTENBERG_ENDPOINT: http://gotenberg:3000
+      PAPERLESS_APPS: allauth.socialaccount.providers.openid_connect
+      PAPERLESS_SOCIALACCOUNT_PROVIDERS: >
+          {
+            "openid_connect": {
+              "APPS": [
+                {
+                  "provider_id": "authentik",
+                  "name": "Authentik",
+                  "client_id": "${OAUTH_CLIENT_ID}",
+                  "secret": "${OAUTH_CLIENT_SECRET}",
+                  "settings": {
+                    "server_url": "${OAUTH_CLIENT_URL}"
+                  }
+                }
+              ],
+              "OAUTH_PKCE_ENABLED": "True"
+            }
+          }
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pplngx.rule=Host(`${URL_PAPERLESSNGX}`)
+      - traefik.http.routers.pplngx.entrypoints=websecure
+      - traefik.http.routers.pplngx.tls=true
+      - traefik.http.services.pplngx-service.loadbalancer.server.port=8000
+
+
+  gotenberg:
+    image: docker.io/gotenberg/gotenberg:8.12
+    restart: unless-stopped
+    networks:
+      - backend
+    # The gotenberg chromium route is used to convert .eml files. We do not
+    # want to allow external content like tracking pixels or even javascript.
+    command:
+      - "gotenberg"
+      - "--chromium-disable-javascript=true"
+      - "--chromium-allow-list=file:///tmp/.*"
+
+  tika:
+    networks:
+      - backend
+    image: ghcr.io/paperless-ngx/tika:latest
+    restart: unless-stopped
+
+networks:
+  frontend:
+    external: true
+  backend:
+    external: true
